@@ -813,7 +813,7 @@ mod test {
 
     #[test]
     fn test_arena() {
-        let mut arena = Arena::new(16 * 1024).unwrap();
+        let arena = Arena::new(16 * 1024).unwrap();
         let slice = unsafe { arena.alloc_raw(1024, 16).unwrap() };
         assert_eq!(slice.len(), 1024);
         assert_eq!(slice.as_ptr() as usize % 16, 0);
@@ -822,7 +822,7 @@ mod test {
 
     #[test]
     fn test_arena_aligned() {
-        let mut arena = Arena::new(16 * 1024).unwrap();
+        let arena = Arena::new(16 * 1024).unwrap();
         // Misalign the position by allocating 1 byte first
         let _ = unsafe { arena.alloc_raw(1, 1).unwrap() };
         let slice = unsafe { arena.alloc_raw_aligned(64, 64).unwrap() };
@@ -839,7 +839,7 @@ mod test {
     #[test]
     fn test_fail_commit() {
         let size = 16 * 1024;
-        let mut arena = Arena::new(size).unwrap();
+        let arena = Arena::new(size).unwrap();
         let result = unsafe { arena.alloc_raw(size * 2, 16) };
         assert!(result.is_err());
     }
@@ -869,7 +869,7 @@ mod test {
 
     #[test]
     fn test_typed_arena() {
-        let mut arena = TypedArena::<u32>::new(32 * 1024).unwrap();
+        let arena = TypedArena::<u32>::new(32 * 1024).unwrap();
         let single = arena.alloc().unwrap();
         assert_eq!(*single, 0);
         *single = 42;
@@ -901,7 +901,7 @@ mod macos_linux_tests {
             if pid == -1 {
                 panic!("Failed to fork process");
             } else if pid == 0 {
-                let mut arena = TypedArena::<u32>::new(32 * 1024).unwrap();
+                let arena = TypedArena::<u32>::new(32 * 1024).unwrap();
                 let single_ptr: *mut u32;
                 {
                     let single = arena.alloc().unwrap();
