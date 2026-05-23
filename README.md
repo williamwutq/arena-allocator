@@ -2,28 +2,27 @@
 [![Crates.io](https://img.shields.io/crates/v/arena-allocator.svg)](https://crates.io/crates/arena-allocator)
 [![Documentation](https://docs.rs/arena-allocator/badge.svg)](https://docs.rs/arena-allocator)
 
-`arena-allocator` is a linear memory allocator for Rust that provides efficient memory management for performance-critical code. The way it's implemented is by reserving a (large) virtual range of memory and then commiting memory as it needs it. 
-This means that reserving a large range (several Gigabytes) of memory is cheap, but actually using it will cause the OS to allocate physical memory. 
-This is useful for cases where you need to allocate a lot of memory, or don't know how much memory you need.
+A fast linear/arena allocator for Rust. Reserves a large virtual address range upfront and commits physical pages on demand, making large reservations (several GB) cheap.
 
-There are two main uses for this crate:
+Two main use cases:
+1. Long-lived allocations — allocate once, use for the program's lifetime.
+2. Temporary allocations — allocate freely, then call `rewind()` to reset the arena in one step.
 
-1. Long-lived memory: If you have allocations that live for the entire lifetime of your program.
-2. Temporary memory: If you have a lot of temporary allocations that is only needed during a short period of time. 
+## Safety
 
-## Saftey
+Use-after-rewind is prevented at two levels:
 
-This crate should be considered a advanced form of memory management and should be used with caution. 
-The crate is designed to be used in performance-critical code and breaks some of the safety guarantees provided by Rust's memory model. 
-In particular, the arena-allocator crate allows for the reuse of memory after it has been deallocated, which can lead to use-after-free bugs if not used correctly. 
-It is important to understand the implications of using this crate and to follow best practices for memory management to avoid memory leaks and other issues.
-In debug mode, the crate provides memory protection to help catch use-after-free bugs by causing crashes when invalid memory is accessed.
+- Compile time — `rewind()` consumes the arena (`self`), so the borrow checker rejects any live references at the call site:
+  ```rust
+  let arena = Arena::new(1 << 30)?;
+  let slice = arena.alloc_array_init::<u32>(10)?;
+  arena = arena.rewind(); // compile error: arena is borrowed by `slice`
+  ```
+  Dropping all references before rewinding is required by the type system.
 
-See the Understanding rewind section for more information on how to use the rewind function to manage memory in the arena.
+- Debug mode — after `rewind()`, the old memory pages are `mprotect`'d as `PROT_NONE`. Any stale raw pointer access crashes immediately.
 
-## Getting Started
-
-Add the following to your `Cargo.toml`:
+## Usage
 
 ```toml
 [dependencies]
@@ -36,49 +35,34 @@ Example:
 use arena_allocator::{Arena, TypedArena, ArenaError};
 
 fn main() -> Result<(), ArenaError> {
-    // Create a new arena with 1 GB bytes of reserved memory.
-    let mut arena = Arena::new(1 * 1024 * 1024 * 1024)?;
+    let arena = Arena::new(1 * 1024 * 1024 * 1024)?;
 
-    // Allocate a single u32 and initialize it to 0.
     let num = arena.alloc_init::<u32>()?;
     *num = 42;
 
-    // Allocate an array of 10 u32s and initialize them to 0.
     let array = arena.alloc_array_init::<u32>(10)?;
+    array[0] = 1;
 
-    // Rewind the arena, invalidating all previous allocations.
-    arena.rewind();
+    // Drop references before rewinding
+    _ = num;
+    _ = array;
+    let arena = arena.rewind();
 
     Ok(())
 }
 ```
 
-## Understanding rewind
-
-The `rewind` function invalidates all previous allocations in the arena, allowing the memory to be reused for new allocations. 
-By rewinding the arena, you can quickly recycle memory for new allocations without incurring the cost of deallocating and reallocating memory.
-However, it is important to note that rewinding the arena will invalidate all previous allocations, so any references or pointers to memory allocated in the arena will become invalid after calling `rewind`.
-
-Example:
+`TypedArena<T>` provides the same API restricted to a single type:
 
 ```rust
-use arena_allocator::{Arena, TypedArena, ArenaError};
+use arena_allocator::TypedArena;
 
-fn main() -> Result<(), ArenaError> {
-    // Create a new arena with 1 GB bytes of reserved memory.
-    let mut arena = Arena::new(1 * 1024 * 1024 * 1024)?;
-
-    // Allocate a single u32 and initialize it to 0.
-    let num = arena.alloc_init::<u32>()?;
-    *num = 42;
-
-    arena.rewind();
-
-    *num = 42; // This will cause a crash in debug mode due to memory protection in debug mode.
-
-    Ok(())
-}
+let arena = TypedArena::<u32>::new(1 * 1024 * 1024 * 1024)?;
+let item = arena.alloc()?;
+*item = 42;
+# Ok::<(), arena_allocator::ArenaError>(())
 ```
+
 ## License
 
 Licensed under either of
