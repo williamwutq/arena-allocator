@@ -272,16 +272,15 @@ pub(crate) use posix::*;
 pub(crate) use windows::*;
 
 #[derive(Copy, Clone)]
-struct VmRange<'a> {
+struct VmRange {
     ptr: *mut c_void,
     reserved_size: usize,
     committed_size: usize,
     pos: usize,
     page_size: usize,
-    marker: core::marker::PhantomData<&'a c_void>,
 }
 
-impl<'a> VmRange<'a> {
+impl VmRange {
     pub fn new(reserved_size: usize) -> Result<Self, ArenaError> {
         let page_size = get_page_size();
         let ptr = reserve_range(std::cmp::max(reserved_size, page_size))?;
@@ -290,7 +289,6 @@ impl<'a> VmRange<'a> {
             reserved_size,
             committed_size: 0,
             pos: 0,
-            marker: core::marker::PhantomData,
             page_size,
         })
     }
@@ -305,8 +303,8 @@ impl<'a> VmRange<'a> {
     /// # Safety
     /// The returned data is uninitialized. The caller must ensure that the data is
     /// properly initialized.
-    pub(crate) unsafe fn alloc_raw(
-        &mut self,
+    pub(crate) unsafe fn alloc_raw<'a>(
+        &'a mut self,
         size: usize,
         alignment: usize,
     ) -> Result<&'a mut [u8], ArenaError> {
@@ -341,8 +339,8 @@ impl<'a> VmRange<'a> {
     /// # Safety
     /// The returned memory is uninitialized. The caller must ensure that the memory is
     /// properly initialized before use. `alignment` must be a power of two.
-    pub(crate) unsafe fn alloc_raw_aligned(
-        &mut self,
+    pub(crate) unsafe fn alloc_raw_aligned<'a>(
+        &'a mut self,
         size: usize,
         alignment: usize,
     ) -> Result<&'a mut [u8], ArenaError> {
@@ -370,8 +368,8 @@ impl<'a> VmRange<'a> {
     /// # Safety
     /// The returned data is uninitialized. The caller must ensure that the data is
     /// properly initialized.
-    pub(crate) unsafe fn alloc_array<T: Sized>(
-        &mut self,
+    pub(crate) unsafe fn alloc_array<'a, T: Sized>(
+        &'a mut self,
         count: usize,
     ) -> Result<&'a mut [T], ArenaError> {
         let size = count * core::mem::size_of::<T>();
@@ -383,8 +381,8 @@ impl<'a> VmRange<'a> {
 
     /// Allocates an array of `T` elements in the arena and initializes them with the default
     /// value.
-    pub(crate) fn alloc_array_init<T: Default + Sized>(
-        &mut self,
+    pub(crate) fn alloc_array_init<'a, T: Default + Sized>(
+        &'a mut self,
         count: usize,
     ) -> Result<&'a mut [T], ArenaError> {
         let size = count * core::mem::size_of::<T>();
@@ -405,7 +403,7 @@ impl<'a> VmRange<'a> {
     /// # Safety
     /// The returned data is uninitialized. The caller must ensure that the data is
     /// properly initialized.
-    pub(crate) unsafe fn alloc<T: Sized>(&mut self) -> Result<&'a mut T, ArenaError> {
+    pub(crate) unsafe fn alloc<'a, T: Sized>(&'a mut self) -> Result<&'a mut T, ArenaError> {
         let size = core::mem::size_of::<T>();
         let alignment = core::mem::align_of::<T>();
         let slice = self.alloc_raw(size, alignment)?;
@@ -413,7 +411,7 @@ impl<'a> VmRange<'a> {
         Ok(unsafe { &mut *ptr })
     }
 
-    pub(crate) fn alloc_init<T: Default + Sized>(&mut self) -> Result<&'a mut T, ArenaError> {
+    pub(crate) fn alloc_init<'a, T: Default + Sized>(&'a mut self) -> Result<&'a mut T, ArenaError> {
         let size = core::mem::size_of::<T>();
         let alignment = core::mem::align_of::<T>();
         let slice = unsafe { self.alloc_raw(size, alignment)? };
@@ -484,13 +482,13 @@ impl<'a> VmRange<'a> {
 /// In debug builds, additional memory protection is enabled to catch potential memory safety issues
 /// such as use-after-free, though this comes at the cost of increased memory usage. This feature is
 /// automatically disabled in release builds for optimal performance.
-pub struct Arena<'a> {
-    current: VmRange<'a>,
+pub struct Arena {
+    current: VmRange,
     //#[cfg(debug_assertions)]
-    prev: VmRange<'a>,
+    prev: VmRange,
 }
 
-impl<'a> Arena<'a> {
+impl Arena {
     /// Initializes a new `Arena` with the specified size. The `size` parameter defines the amount
     /// of reserved virtual memory. It is recommended to choose a large size since this reservation
     /// does not immediately consume physical memory. On a 64-bit system, reserving a few gigabytes
@@ -521,8 +519,8 @@ impl<'a> Arena<'a> {
     /// The returned memory is uninitialized, and it is the caller's responsibility to ensure that
     /// the memory is properly initialized before it is used. Failing to do so may result in undefined
     /// behavior.
-    pub unsafe fn alloc_raw(
-        &mut self,
+    pub unsafe fn alloc_raw<'a>(
+        &'a mut self,
         size: usize,
         alignment: usize,
     ) -> Result<&'a mut [u8], ArenaError> {
@@ -541,8 +539,8 @@ impl<'a> Arena<'a> {
     /// that the memory is properly initialized before it is used. `alignment` must be a power
     /// of two. Failing to initialize the memory or passing a non-power-of-two alignment may
     /// result in undefined behavior.
-    pub unsafe fn alloc_raw_aligned(
-        &mut self,
+    pub unsafe fn alloc_raw_aligned<'a>(
+        &'a mut self,
         size: usize,
         alignment: usize,
     ) -> Result<&'a mut [u8], ArenaError> {
@@ -559,8 +557,8 @@ impl<'a> Arena<'a> {
     /// The returned array is uninitialized, and it is the caller's responsibility to initialize the
     /// elements before use. Using uninitialized data can lead to undefined behavior. After the arena
     /// is rewound, all references to this array become invalid.
-    pub unsafe fn alloc_array<T: Sized>(
-        &mut self,
+    pub unsafe fn alloc_array<'a, T: Sized>(
+        &'a mut self,
         count: usize,
     ) -> Result<&'a mut [T], ArenaError> {
         self.current.alloc_array(count)
@@ -573,7 +571,7 @@ impl<'a> Arena<'a> {
     /// # Safety
     /// The returned instance is uninitialized, and the caller must ensure that it is initialized
     /// before any use. Uninitialized memory can lead to undefined behavior if accessed.
-    pub unsafe fn alloc<T: Sized>(&mut self) -> Result<&'a mut T, ArenaError> {
+    pub unsafe fn alloc<'a, T: Sized>(&'a mut self) -> Result<&'a mut T, ArenaError> {
         self.current.alloc()
     }
 
@@ -581,7 +579,7 @@ impl<'a> Arena<'a> {
     ///
     /// This function allocates memory for a single instance of type `T` and initializes it using
     /// `T::default()`.
-    pub fn alloc_init<T: Default + Sized>(&mut self) -> Result<&'a mut T, ArenaError> {
+    pub fn alloc_init<'a, T: Default + Sized>(&'a mut self) -> Result<&'a mut T, ArenaError> {
         self.current.alloc_init()
     }
 
@@ -589,33 +587,48 @@ impl<'a> Arena<'a> {
     ///
     /// This function allocates memory for an array of elements of type `T`, and initializes each
     /// element using `T::default()`.
-    pub fn alloc_array_init<T: Default + Sized>(
-        &mut self,
+    pub fn alloc_array_init<'a, T: Default + Sized>(
+        &'a mut self,
         count: usize,
     ) -> Result<&'a mut [T], ArenaError> {
         self.current.alloc_array_init(count)
     }
 
-    /// Rewinds the arena to its initial state.
+    /// Rewinds the arena to its initial state, consuming self and returning a new arena.
     ///
     /// This method resets the allocation position to the start of the arena without deallocating
-    /// the memory. After calling `rewind`, all references to previously allocated memory in the
-    /// arena should be considered invalid, as any subsequent allocation will overwrite this memory.
+    /// the memory. By consuming `self`, this ensures that all references to previously allocated
+    /// memory are dropped before the arena can be used again, providing compile-time safety against
+    /// use-after-rewind bugs.
     ///
     /// # Memory Safety
     ///
-    /// In debug mode, calling `rewind` will protect the memory that has been rewound, helping to
-    /// catch use-after-free bugs. Any access to memory that was allocated before the `rewind` will
-    /// result in a crash, as demonstrated in the example below:
+    /// The following code will not compile because the reference `t` cannot outlive the rewind:
+    ///
+    /// ```compile_fail
+    /// use arena_allocator::Arena;
+    ///
+    /// let mut arena = Arena::new(16 * 1024).unwrap();
+    /// let t = arena.alloc_array_init::<u32>(10).unwrap();
+    /// let u = &t[0];  // Borrow from t
+    /// arena = arena.rewind();  // Error: cannot move `arena` while borrowed
+    /// println!("{}", u);  // u keeps the borrow alive
+    /// ```
+    ///
+    /// The correct usage requires dropping all references before rewind:
     ///
     /// ```
     /// use arena_allocator::Arena;
     ///
     /// let mut arena = Arena::new(16 * 1024).unwrap();
-    /// let t = arena.alloc_init::<u32>().unwrap();
-    /// *t = 42;
-    /// arena.rewind();
-    /// //*t = 43; // This will crash in debug mode
+    /// {
+    ///     let t = arena.alloc_init::<u32>().unwrap();
+    ///     *t = 42;
+    ///     // t goes out of scope here
+    /// }
+    /// arena = arena.rewind();  // OK: no references exist
+    /// let t2 = arena.alloc_init::<u32>().unwrap();
+    /// *t2 = 100;
     /// ```
     ///
     /// # Usage
@@ -624,10 +637,10 @@ impl<'a> Arena<'a> {
     /// allocations that are discarded en masse. By rewinding the arena, the allocator can quickly
     /// reset and re-use the reserved memory without the overhead of deallocation and reallocation.
     ///
-    /// In release mode, the memory protection mechanism is disabled to ensure optimal performance,
-    /// but in debug mode, the additional checks help identify improper memory usage patterns.
+    /// In debug mode, the old memory is protected to catch bugs, while in release mode this
+    /// protection is disabled for optimal performance.
     #[cfg(debug_assertions)]
-    pub fn rewind(&mut self) {
+    pub fn rewind(mut self) -> Self {
         self.current.protect();
 
         std::mem::swap(&mut self.current, &mut self.prev);
@@ -635,15 +648,17 @@ impl<'a> Arena<'a> {
         // Unprotect the new current range and rewind the position to the start
         self.current.unprotect();
         self.current.rewind();
+        self
     }
 
     #[cfg(not(debug_assertions))]
-    pub fn rewind(&mut self) {
+    pub fn rewind(mut self) -> Self {
         self.current.rewind();
+        self
     }
 }
 
-impl Drop for Arena<'_> {
+impl Drop for Arena {
     #[cfg(debug_assertions)]
     fn drop(&mut self) {
         self.current.decomit().unwrap();
@@ -695,12 +710,12 @@ impl Drop for Arena<'_> {
 ///
 /// arena.rewind(); // All previous allocations are now invalid.
 /// ```
-pub struct TypedArena<'a, T: Default + Sized> {
-    arena: Arena<'a>,
-    ptr_type: core::marker::PhantomData<&'a T>,
+pub struct TypedArena<T: Default + Sized> {
+    arena: Arena,
+    ptr_type: core::marker::PhantomData<T>,
 }
 
-impl<'a, T: Default + Sized> TypedArena<'a, T> {
+impl<T: Default + Sized> TypedArena<T> {
     /// Creates a new `TypedArena` with the specified size.
     ///
     /// The `size` parameter specifies the amount of memory to reserve in the arena. It is
@@ -724,7 +739,7 @@ impl<'a, T: Default + Sized> TypedArena<'a, T> {
     ///
     /// # Errors
     /// This function will return an `ArenaError` if the memory allocation fails.
-    pub fn alloc(&mut self) -> Result<&'a mut T, ArenaError> {
+    pub fn alloc<'a>(&'a mut self) -> Result<&'a mut T, ArenaError> {
         self.arena.alloc_init()
     }
 
@@ -735,22 +750,54 @@ impl<'a, T: Default + Sized> TypedArena<'a, T> {
     ///
     /// # Errors
     /// This function will return an `ArenaError` if the memory allocation fails.
-    pub fn alloc_array(&mut self, count: usize) -> Result<&'a mut [T], ArenaError> {
+    pub fn alloc_array<'a>(&'a mut self, count: usize) -> Result<&'a mut [T], ArenaError> {
         self.arena.alloc_array_init(count)
     }
 
-    /// Rewinds the arena to its initial state, invalidating all previous allocations.
+    /// Rewinds the arena to its initial state, consuming self and returning a new arena.
     ///
-    /// This method resets the arena, allowing it to be reused for new allocations. All previously
-    /// allocated objects become invalid after this operation, and any attempt to access them will
-    /// result in undefined behavior. In debug mode, the memory of the invalidated objects is
-    /// protected to help catch use-after-free bugs.
+    /// This method resets the arena, allowing it to be reused for new allocations. By consuming
+    /// `self`, this ensures that all references to previously allocated objects are dropped before
+    /// the arena can be used again, providing compile-time safety against use-after-rewind bugs.
+    ///
+    /// # Compile-Time Safety
+    ///
+    /// The following code will not compile because the reference cannot outlive the rewind:
+    ///
+    /// ```compile_fail
+    /// use arena_allocator::TypedArena;
+    ///
+    /// let mut arena = TypedArena::<u32>::new(16 * 1024).unwrap();
+    /// let item = arena.alloc_array(10).unwrap();
+    /// let u = &item[0];  // Borrow from item  
+    /// arena = arena.rewind();  // Error: cannot move `arena` while borrowed
+    /// println!("{}", u);  // u keeps the borrow alive
+    /// ```
+    ///
+    /// The correct usage requires dropping all references before rewind:
+    ///
+    /// ```
+    /// use arena_allocator::TypedArena;
+    ///
+    /// let mut arena = TypedArena::<u32>::new(16 * 1024).unwrap();
+    /// {
+    ///     let item = arena.alloc().unwrap();
+    ///     *item = 42;
+    ///     // item goes out of scope here
+    /// }
+    /// arena = arena.rewind();  // OK: no references exist
+    /// let item2 = arena.alloc().unwrap();
+    /// *item2 = 100;
+    /// ```
     ///
     /// # Usage
     /// `rewind` is particularly useful in scenarios where the arena is used for temporary allocations
     /// that need to be quickly discarded and recycled.
-    pub fn rewind(&mut self) {
-        self.arena.rewind();
+    pub fn rewind(self) -> Self {
+        Self {
+            arena: self.arena.rewind(),
+            ptr_type: core::marker::PhantomData,
+        }
     }
 }
 
@@ -826,11 +873,15 @@ mod macos_linux_tests {
                 panic!("Failed to fork process");
             } else if pid == 0 {
                 let mut arena = TypedArena::<u32>::new(32 * 1024).unwrap();
-                let single = arena.alloc().unwrap();
-                *single = 42;
-                arena.rewind();
-                *single = 43; // will crash here as trying to write to protected memory
-                println!("Single: {}", *single);
+                let single_ptr: *mut u32;
+                {
+                    let single = arena.alloc().unwrap();
+                    *single = 42;
+                    single_ptr = single as *mut u32;
+                }
+                _ = arena.rewind();
+                *single_ptr = 43; // will crash here as trying to write to protected memory
+                println!("Single: {}", *single_ptr);
             } else {
                 // Parent process
                 let mut status = 0;
