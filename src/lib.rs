@@ -1,23 +1,24 @@
+use core::cell::Cell;
 use core::ffi::c_void;
 use std::result::Result;
 
 /// Represents errors that can occur when using the `arena-allocator`.
 ///
-/// The `ArenaError` enum encapsulates different types of errors that might be encountered while 
-/// interacting with the `Arena` or `TypedArena`. These errors typically arise from issues 
+/// The `ArenaError` enum encapsulates different types of errors that might be encountered while
+/// interacting with the `Arena` or `TypedArena`. These errors typically arise from issues
 /// related to memory reservation, protection, or when the arena runs out of reserved memory.
 ///
 /// # Variants
 ///
-/// - `ReserveFailed(String)`: This error occurs when the initial reservation of virtual memory 
+/// - `ReserveFailed(String)`: This error occurs when the initial reservation of virtual memory
 ///   fails. The associated string provides a description of the underlying issue.
 ///
-/// - `ProtectionFailed(String)`: This error is returned when the memory protection mechanisms 
-///   fail. This is especially relevant in debug mode, where memory protection is used to detect 
+/// - `ProtectionFailed(String)`: This error is returned when the memory protection mechanisms
+///   fail. This is especially relevant in debug mode, where memory protection is used to detect
 ///   use-after-free bugs. The associated string provides a detailed explanation of the failure.
 ///
-/// - `OutOfReservedMemory`: This error is triggered when an allocation request exceeds the 
-///   available reserved memory. It indicates that the arena has run out of its pre-reserved 
+/// - `OutOfReservedMemory`: This error is triggered when an allocation request exceeds the
+///   available reserved memory. It indicates that the arena has run out of its pre-reserved
 ///   virtual memory and cannot accommodate additional allocations without further action.
 #[derive(Debug)]
 pub enum ArenaError {
@@ -271,12 +272,11 @@ pub(crate) use posix::*;
 #[cfg(target_os = "windows")]
 pub(crate) use windows::*;
 
-#[derive(Copy, Clone)]
 struct VmRange {
     ptr: *mut c_void,
     reserved_size: usize,
-    committed_size: usize,
-    pos: usize,
+    committed_size: Cell<usize>,
+    pos: Cell<usize>,
     page_size: usize,
 }
 
@@ -287,8 +287,8 @@ impl VmRange {
         Ok(Self {
             ptr,
             reserved_size,
-            committed_size: 0,
-            pos: 0,
+            committed_size: Cell::new(0),
+            pos: Cell::new(0),
             page_size,
         })
     }
@@ -304,29 +304,33 @@ impl VmRange {
     /// The returned data is uninitialized. The caller must ensure that the data is
     /// properly initialized.
     pub(crate) unsafe fn alloc_raw<'a>(
-        &'a mut self,
+        &'a self,
         size: usize,
         alignment: usize,
     ) -> Result<&'a mut [u8], ArenaError> {
-        let new_pos = self.pos + Self::align_pow2(size, alignment);
-        let commit_size = Self::align_pow2(size, self.page_size);
+        let pos = self.pos.get();
+        let new_pos = pos + Self::align_pow2(size, alignment);
+        let committed = self.committed_size.get();
 
-        if self.committed_size + commit_size > self.reserved_size {
-            return Err(ArenaError::OutOfReservedMemory);
-        }
-
-        // If we have already committed the memory, we can just return a slice
-        if new_pos < self.committed_size {
-            let return_slice = std::slice::from_raw_parts_mut(self.ptr as *mut u8, size);
-            self.pos = new_pos;
+        // If we have already committed enough memory, we can just return a slice
+        if new_pos <= committed {
+            let return_slice = std::slice::from_raw_parts_mut(self.ptr.add(pos) as *mut u8, size);
+            self.pos.set(new_pos);
             return Ok(return_slice);
         }
 
-        commit_memory(self.ptr.add(self.committed_size), commit_size)?;
+        // Need to commit more memory
+        let needed_commit = Self::align_pow2(new_pos, self.page_size);
+        if needed_commit > self.reserved_size {
+            return Err(ArenaError::OutOfReservedMemory);
+        }
 
-        self.committed_size += commit_size;
-        let return_slice = std::slice::from_raw_parts_mut(self.ptr.add(self.pos) as *mut u8, size);
-        self.pos = new_pos;
+        let commit_size = needed_commit - committed;
+        commit_memory(self.ptr.add(committed), commit_size)?;
+
+        self.committed_size.set(needed_commit);
+        let return_slice = std::slice::from_raw_parts_mut(self.ptr.add(pos) as *mut u8, size);
+        self.pos.set(new_pos);
         Ok(return_slice)
     }
 
@@ -340,26 +344,28 @@ impl VmRange {
     /// The returned memory is uninitialized. The caller must ensure that the memory is
     /// properly initialized before use. `alignment` must be a power of two.
     pub(crate) unsafe fn alloc_raw_aligned<'a>(
-        &'a mut self,
+        &'a self,
         size: usize,
         alignment: usize,
     ) -> Result<&'a mut [u8], ArenaError> {
-        let aligned_pos = Self::align_pow2(self.pos, alignment);
+        let pos = self.pos.get();
+        let aligned_pos = Self::align_pow2(pos, alignment);
         let new_pos = aligned_pos + size;
         let needed_commit = Self::align_pow2(new_pos, self.page_size);
+        let committed = self.committed_size.get();
 
         if needed_commit > self.reserved_size {
             return Err(ArenaError::OutOfReservedMemory);
         }
 
-        if new_pos > self.committed_size {
-            let extra = needed_commit - self.committed_size;
-            commit_memory(self.ptr.add(self.committed_size), extra)?;
-            self.committed_size = needed_commit;
+        if new_pos > committed {
+            let extra = needed_commit - committed;
+            commit_memory(self.ptr.add(committed), extra)?;
+            self.committed_size.set(needed_commit);
         }
 
         let slice = std::slice::from_raw_parts_mut(self.ptr.add(aligned_pos) as *mut u8, size);
-        self.pos = new_pos;
+        self.pos.set(new_pos);
         Ok(slice)
     }
 
@@ -369,7 +375,7 @@ impl VmRange {
     /// The returned data is uninitialized. The caller must ensure that the data is
     /// properly initialized.
     pub(crate) unsafe fn alloc_array<'a, T: Sized>(
-        &'a mut self,
+        &'a self,
         count: usize,
     ) -> Result<&'a mut [T], ArenaError> {
         let size = count * core::mem::size_of::<T>();
@@ -382,7 +388,7 @@ impl VmRange {
     /// Allocates an array of `T` elements in the arena and initializes them with the default
     /// value.
     pub(crate) fn alloc_array_init<'a, T: Default + Sized>(
-        &'a mut self,
+        &'a self,
         count: usize,
     ) -> Result<&'a mut [T], ArenaError> {
         let size = count * core::mem::size_of::<T>();
@@ -403,7 +409,7 @@ impl VmRange {
     /// # Safety
     /// The returned data is uninitialized. The caller must ensure that the data is
     /// properly initialized.
-    pub(crate) unsafe fn alloc<'a, T: Sized>(&'a mut self) -> Result<&'a mut T, ArenaError> {
+    pub(crate) unsafe fn alloc<'a, T: Sized>(&'a self) -> Result<&'a mut T, ArenaError> {
         let size = core::mem::size_of::<T>();
         let alignment = core::mem::align_of::<T>();
         let slice = self.alloc_raw(size, alignment)?;
@@ -411,7 +417,7 @@ impl VmRange {
         Ok(unsafe { &mut *ptr })
     }
 
-    pub(crate) fn alloc_init<'a, T: Default + Sized>(&'a mut self) -> Result<&'a mut T, ArenaError> {
+    pub(crate) fn alloc_init<'a, T: Default + Sized>(&'a self) -> Result<&'a mut T, ArenaError> {
         let size = core::mem::size_of::<T>();
         let alignment = core::mem::align_of::<T>();
         let slice = unsafe { self.alloc_raw(size, alignment)? };
@@ -422,24 +428,24 @@ impl VmRange {
 
     #[inline]
     pub(crate) fn rewind(&mut self) {
-        self.pos = 0;
+        self.pos.set(0);
     }
 
     #[cfg(debug_assertions)]
     pub(crate) fn protect(&mut self) {
-        protect_memory(self.ptr, self.committed_size).unwrap();
+        protect_memory(self.ptr, self.committed_size.get()).unwrap();
     }
 
     #[cfg(debug_assertions)]
     pub(crate) fn unprotect(&mut self) {
-        unprotect_memory(self.ptr, self.committed_size).unwrap();
+        unprotect_memory(self.ptr, self.committed_size.get()).unwrap();
     }
 
     #[inline]
     pub(crate) fn decomit(&mut self) -> Result<(), ArenaError> {
-        decommit_memory(self.ptr, self.committed_size)?;
-        self.committed_size = 0;
-        self.pos = 0;
+        decommit_memory(self.ptr, self.committed_size.get())?;
+        self.committed_size.set(0);
+        self.pos.set(0);
         Ok(())
     }
 }
@@ -520,7 +526,7 @@ impl Arena {
     /// the memory is properly initialized before it is used. Failing to do so may result in undefined
     /// behavior.
     pub unsafe fn alloc_raw<'a>(
-        &'a mut self,
+        &'a self,
         size: usize,
         alignment: usize,
     ) -> Result<&'a mut [u8], ArenaError> {
@@ -540,7 +546,7 @@ impl Arena {
     /// of two. Failing to initialize the memory or passing a non-power-of-two alignment may
     /// result in undefined behavior.
     pub unsafe fn alloc_raw_aligned<'a>(
-        &'a mut self,
+        &'a self,
         size: usize,
         alignment: usize,
     ) -> Result<&'a mut [u8], ArenaError> {
@@ -558,7 +564,7 @@ impl Arena {
     /// elements before use. Using uninitialized data can lead to undefined behavior. After the arena
     /// is rewound, all references to this array become invalid.
     pub unsafe fn alloc_array<'a, T: Sized>(
-        &'a mut self,
+        &'a self,
         count: usize,
     ) -> Result<&'a mut [T], ArenaError> {
         self.current.alloc_array(count)
@@ -571,7 +577,7 @@ impl Arena {
     /// # Safety
     /// The returned instance is uninitialized, and the caller must ensure that it is initialized
     /// before any use. Uninitialized memory can lead to undefined behavior if accessed.
-    pub unsafe fn alloc<'a, T: Sized>(&'a mut self) -> Result<&'a mut T, ArenaError> {
+    pub unsafe fn alloc<'a, T: Sized>(&'a self) -> Result<&'a mut T, ArenaError> {
         self.current.alloc()
     }
 
@@ -579,7 +585,7 @@ impl Arena {
     ///
     /// This function allocates memory for a single instance of type `T` and initializes it using
     /// `T::default()`.
-    pub fn alloc_init<'a, T: Default + Sized>(&'a mut self) -> Result<&'a mut T, ArenaError> {
+    pub fn alloc_init<'a, T: Default + Sized>(&'a self) -> Result<&'a mut T, ArenaError> {
         self.current.alloc_init()
     }
 
@@ -588,7 +594,7 @@ impl Arena {
     /// This function allocates memory for an array of elements of type `T`, and initializes each
     /// element using `T::default()`.
     pub fn alloc_array_init<'a, T: Default + Sized>(
-        &'a mut self,
+        &'a self,
         count: usize,
     ) -> Result<&'a mut [T], ArenaError> {
         self.current.alloc_array_init(count)
@@ -739,7 +745,7 @@ impl<T: Default + Sized> TypedArena<T> {
     ///
     /// # Errors
     /// This function will return an `ArenaError` if the memory allocation fails.
-    pub fn alloc<'a>(&'a mut self) -> Result<&'a mut T, ArenaError> {
+    pub fn alloc<'a>(&'a self) -> Result<&'a mut T, ArenaError> {
         self.arena.alloc_init()
     }
 
@@ -750,7 +756,7 @@ impl<T: Default + Sized> TypedArena<T> {
     ///
     /// # Errors
     /// This function will return an `ArenaError` if the memory allocation fails.
-    pub fn alloc_array<'a>(&'a mut self, count: usize) -> Result<&'a mut [T], ArenaError> {
+    pub fn alloc_array<'a>(&'a self, count: usize) -> Result<&'a mut [T], ArenaError> {
         self.arena.alloc_array_init(count)
     }
 
@@ -836,6 +842,29 @@ mod test {
         let mut arena = Arena::new(size).unwrap();
         let result = unsafe { arena.alloc_raw(size * 2, 16) };
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_no_aliasing() {
+        // This test verifies that multiple allocations don't overlap/alias
+        let arena = Arena::new(16 * 1024).unwrap();
+
+        // Allocate two u32 values - now we can have both at once!
+        let a = arena.alloc_init::<u32>().unwrap();
+        let b = arena.alloc_init::<u32>().unwrap();
+
+        // Write different values to each
+        *a = 42;
+        *b = 99;
+
+        // Verify they maintained their separate values (no aliasing)
+        assert_eq!(*a, 42);
+        assert_eq!(*b, 99);
+
+        // Verify they point to different memory locations
+        let ptr_a = a as *const u32;
+        let ptr_b = b as *const u32;
+        assert_ne!(ptr_a, ptr_b);
     }
 
     #[test]
