@@ -32,7 +32,7 @@ mod posix {
     use core::ffi::{c_void, CStr};
     use core::ptr::null_mut;
     use libc::{mmap, mprotect, strerror_r, sysconf};
-    use libc::{MAP_ANON, MAP_PRIVATE, PROT_NONE, PROT_READ, PROT_WRITE, _SC_PAGESIZE};
+    use libc::{_SC_PAGESIZE, MAP_ANON, MAP_PRIVATE, PROT_NONE, PROT_READ, PROT_WRITE};
     use std::io;
 
     const MAP_FAILED: *mut c_void = !0 as *mut c_void;
@@ -332,6 +332,39 @@ impl<'a> VmRange<'a> {
         Ok(return_slice)
     }
 
+    /// Allocates a raw aligned memory block in the arena, returning a raw pointer.
+    ///
+    /// Unlike `alloc_raw`, which aligns the *size* of the allocation, this function aligns
+    /// the *starting address* of the returned pointer to `alignment` bytes by skipping any
+    /// padding needed at the current position.
+    ///
+    /// # Safety
+    /// The returned memory is uninitialized. The caller must ensure that the memory is
+    /// properly initialized before use. `alignment` must be a power of two.
+    pub(crate) unsafe fn alloc_raw_aligned(
+        &mut self,
+        size: usize,
+        alignment: usize,
+    ) -> Result<&'a mut [u8], ArenaError> {
+        let aligned_pos = Self::align_pow2(self.pos, alignment);
+        let new_pos = aligned_pos + size;
+        let needed_commit = Self::align_pow2(new_pos, self.page_size);
+
+        if needed_commit > self.reserved_size {
+            return Err(ArenaError::OutOfReservedMemory);
+        }
+
+        if new_pos > self.committed_size {
+            let extra = needed_commit - self.committed_size;
+            commit_memory(self.ptr.add(self.committed_size), extra)?;
+            self.committed_size = needed_commit;
+        }
+
+        let slice = std::slice::from_raw_parts_mut(self.ptr.add(aligned_pos) as *mut u8, size);
+        self.pos = new_pos;
+        Ok(slice)
+    }
+
     /// Allocates an array of `T` elements in the arena.
     ///
     /// # Safety
@@ -494,6 +527,26 @@ impl<'a> Arena<'a> {
         alignment: usize,
     ) -> Result<&'a mut [u8], ArenaError> {
         self.current.alloc_raw(size, alignment)
+    }
+
+    /// Allocates a raw aligned memory block in the arena, returning a raw pointer.
+    ///
+    /// This function allocates `size` bytes of uninitialized memory whose starting address is
+    /// aligned to `alignment` bytes. Unlike `alloc_raw`, which only rounds the allocation size
+    /// to the alignment boundary, this function ensures the returned pointer itself satisfies
+    /// the alignment requirement by advancing past any padding at the current position.
+    ///
+    /// # Safety
+    /// The returned memory is uninitialized, and it is the caller's responsibility to ensure
+    /// that the memory is properly initialized before it is used. `alignment` must be a power
+    /// of two. Failing to initialize the memory or passing a non-power-of-two alignment may
+    /// result in undefined behavior.
+    pub unsafe fn alloc_raw_aligned(
+        &mut self,
+        size: usize,
+        alignment: usize,
+    ) -> Result<&'a mut [u8], ArenaError> {
+        self.current.alloc_raw_aligned(size, alignment)
     }
 
     /// Allocates an array of `T` elements in the arena.
@@ -712,6 +765,16 @@ mod test {
         assert_eq!(slice.len(), 1024);
         assert_eq!(slice.as_ptr() as usize % 16, 0);
         assert!(slice.as_ptr() != std::ptr::null_mut());
+    }
+
+    #[test]
+    fn test_arena_aligned() {
+        let mut arena = Arena::new(16 * 1024).unwrap();
+        // Misalign the position by allocating 1 byte first
+        let _ = unsafe { arena.alloc_raw(1, 1).unwrap() };
+        let slice = unsafe { arena.alloc_raw_aligned(64, 64).unwrap() };
+        assert_eq!(slice.len(), 64);
+        assert_eq!(slice.as_ptr() as usize % 64, 0);
     }
 
     #[test]
